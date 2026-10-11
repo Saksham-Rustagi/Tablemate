@@ -67,10 +67,12 @@ Sources: `~/kin/docs/01_photon_track/winners_vs_losers.md` and the Photon track 
 
 ## Backlog (top = next). Mark `[x]` when done, with the commit hash.
 ### Tablemate
-- [ ] **T0** Sessions A (core), B (places + memory) and C (Retell calls) were launched at 2:10 AM: `~/tablemate/logs/cc_{A,B,C}.jsonl`.
+- [x] **T0** Sessions A (core), B (places + memory) and C (Retell calls) were launched at 2:10 AM. B and C are done and committed (3793f97): places/memory 39/39 including a live search; calls 26/26. The Retell LLM (gemini-3.5-flash-lite) and the agent (voice 11labs-Cimo, eleven_v4) were created through sync. A is still running.
+- [ ] **T0b** C2 (web-call fallback: `/retell/phone` answer page, `RETELL_MODE=web`, restaurant WAV script, emoji additions) was launched at 2:25 AM: `logs/cc_C2.jsonl`.
 - [ ] **T1 Integrate:** tsc clean; `tests/replay.ts` (+`GEMINI_OFF=1`), `tests/places_memory.ts` and `tests/calls.ts` all PASS; replace any `// STUB (A)`; commit and push.
-- [ ] **T2 Live server in fake-transport mode** (`TM_TRANSPORT=fake bun src/main.ts` on :3001 behind the :3001 tunnel; `PUBLIC_BASE_URL` is set in `.env`).
-  - Buy 2 Retell numbers: the Tablemate caller, plus a "restaurant sim" inbound agent whose prompt says "fully booked at 7:30, can do 7:45, confirm under the given name". Store them in kv `retell_from_number` and `retell_sim_number`.
+- [ ] **T2 (REVISED: Retell numbers need KYC, so `create-phone-number` returns 403 'No valid KYC'; the user does the Persona ID check in the morning)** Live server in fake-transport mode (`TM_TRANSPORT=fake bun src/main.ts` on :3001 behind the :3001 tunnel; `PUBLIC_BASE_URL` is set in `.env`).
+  - **Now:** test **web mode**. Open Chrome with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream --use-file-for-fake-audio-capture=<abs>/data/restaurant_full_then_745.wav` on the local `/retell/phone?auto=1` page, drive a plan to `book`, and confirm the agent talks, `report_result` arrives and the state reaches `booked`.
+  - The sim LLM/agent already exist (kv `retell_sim_llm_id`, `retell_sim_agent_id`; voice 11labs-Billy), so after KYC a sim number can be bought and bound for phone-to-phone tests.
   - Drive a whole plan through `/dash/simulate` + card POSTs, with `DEMO_RESTAURANT_PHONE` overridden to the sim number **for that process only**.
   - Confirm the real call happens, `report_result` arrives, and the state reaches `booked`.
   - Save the transcript to `docs/test_call_transcript.md`.
@@ -78,14 +80,16 @@ Sources: `~/kin/docs/01_photon_track/winners_vs_losers.md` and the Photon track 
 - [ ] **T4 Dashboard polish:** state strip, facts with quotes, live transcript, Frutiger Aero styling. One screenshot review.
 - [ ] **T5 Docs:** `README.md` (pitch, how it works, architecture mermaid, the never list and where it's enforced, sponsors: Photon, Gemini, Retell+ElevenLabs voice, Google Places), `devpost/DEVPOST.md`, `devpost/DEMO_SCRIPT.md` (2:30, devices: Saksham's iPhone = restaurant + member, Nicole's iPhone = organizer, iPad = types votes), `devpost/JUDGE_QA.md`. Only describe what's in the code.
 - [ ] **T6 Morning setup script + checklist** `docs/MORNING_SETUP.md`:
+  - **Retell KYC first** (dashboard → Phone Numbers → buy a number → Persona ID check, about 5 min if automatic). Then `RETELL_BUY_NUMBER=1 bun scripts/sync_retell.ts`. If KYC goes to manual review, the demo uses web mode (the restaurant answers on the Mac).
   - Photon "Tablemate" project: create, then `projects upgrade` with promo HACKWITHPHOTON (Stripe, the user clicks), `spectrum users add` for both iPhones, each phone texts the line (QR), profile "Tablemate" + avatar.
   - Create the group "HackNC dinner 🍜" and read its chat id into `TM_GROUP_CHAT_IDS`.
   - Switch `DEMO_RESTAURANT_PHONE` back to Saksham's phone.
   - Fallback: run on Kin's Photon project.
 ### Kin (polish only)
-- [ ] **K1 Devpost gallery** `~/kin/devpost/gallery/*.png`: every card state at 3× (from `tests/preview_cards.ts`), the dashboard, the architecture diagram. Embed them in README.
+- [x] **K1 Devpost gallery** (19ebbcd: hero.png 3000×2000, 6 card PNGs at 840×900 via headless Chrome `--force-device-scale-factor=3`, README embeds; quote-sliver CSS fix in render.ts). Dashboard shot still TODO (K5). `~/kin/devpost/gallery/*.png`: every card state at 3× (from `tests/preview_cards.ts`), the dashboard, the architecture diagram. Embed them in README.
 - [ ] **K2 Docs truth pass:** README + DEVPOST mention the "I know Priya" button, the Today card, demo robustness, the Gemini-off fallback. Nothing claimed that isn't in the code.
 - [ ] **K3 Morning runbook** `~/kin/docs/../MORNING_RUNBOOK.md` (shared with Tablemate). From 8:00 to 9:45: rehearse both demos, record videos (shot lists), Devpost fields for each, decision criteria for submitting Kin only vs both.
+- [ ] **K5 Kin dashboard polish:** panels fill the viewport height (no blank lower half at 1440×900); memory-map labels don't overlap (Raj is hidden behind Anita, and the 'lives in'/'dog' edge labels collide); recapture `devpost/gallery/dashboard.png` with real decisions in the feed. Headless Chrome hangs on the polling dashboard, so capture with the harness browser instead.
 - [ ] **K4 Health:** Kin `/health` ok, run.sh alive, the :3000 tunnel alive. Log any problem; fix only if safe.
 
 ## Log
@@ -95,3 +99,4 @@ Sources: `~/kin/docs/01_photon_track/winners_vs_losers.md` and the Photon track 
   - Retell key verified (0 agents, 0 numbers).
   - Photon: only the Kin project "HackNC2026" exists. A new project needs a Stripe checkout with the promo, so the user must do it in the morning.
   - Writing `~/tablemate/CLAUDE.md` was blocked because it needs user approval, so the rules went into `docs/PROJECT_RULES.md`.
+- **2:25 AM** (main): Kin gallery committed (19ebbcd, 1eafa78). Retell numbers are blocked by KYC (see T2). Launched C2 for the web-call fallback.
