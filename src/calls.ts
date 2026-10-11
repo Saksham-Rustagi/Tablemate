@@ -264,7 +264,20 @@ async function verified(req: Request): Promise<{ raw: string; ok: boolean }> {
   const sig = req.headers.get("x-retell-signature") || "";
   const key = process.env.RETELL_API_KEY || "";
   if (!sig || !key) return { raw, ok: false };
-  try { return { raw, ok: await Retell.verify(raw, key, sig) }; } catch { return { raw, ok: false }; }
+  let ok = false;
+  // Only the Retell API key with the "webhook" badge signs webhooks (docs.retellai.com/features/secure-webhook).
+  for (const k of [process.env.RETELL_WEBHOOK_KEY, key].filter(Boolean) as string[]) {
+    try { if (await Retell.verify(raw, k, sig)) { ok = true; break; } } catch { /* try next */ }
+  }
+  if (!ok) {
+    // Documented fallback: allowlist Retell's webhook IP. Behind the Cloudflare tunnel the caller's IP is in
+    // cf-connecting-ip (set by Cloudflare at the edge, so a client can't forge it through the tunnel).
+    const ip = (req.headers.get("cf-connecting-ip") || "").trim();
+    const allow = (process.env.RETELL_IP_ALLOWLIST || "100.20.5.228").split(",").map((x) => x.trim()).filter(Boolean);
+    if (ip && allow.includes(ip)) ok = true;
+    else log.warn(`Retell ${new URL(req.url).pathname}: rejected (signature failed${ip ? `, ip ${ip}` : ""})`);
+  }
+  return { raw, ok };
 }
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
