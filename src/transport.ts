@@ -78,7 +78,7 @@ export async function createSpectrumTransport(): Promise<Transport> {
         for await (const [space, message] of sp.messages) {
           // Privacy (spec §5.6): the Mac is Saksham's real Apple ID. Drop every local message outside the
           // enrolled group chats BEFORE anything logs it.
-          if (message.platform === "local_imessage" && !isEnrolledChat(space?.id)) continue;
+          if (message.platform !== "imessage" && !isEnrolledChat(space?.id)) continue; // fail closed: anything not from the cloud line must be an enrolled group
           yield [space, message] as [Space, Message];
         }
       })();

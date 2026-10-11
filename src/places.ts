@@ -215,7 +215,7 @@ export async function searchPlaces(q: PlanQuery, facts: Fact[]): Promise<SearchR
       walkMin: walkMinOf(p),
       primaryType: p.primaryType ?? "restaurant",
       cuisineLabel: p.primaryTypeDisplayName?.text ?? "Restaurant",
-      emoji: cuisineEmoji(p.primaryType),
+      emoji: cuisineEmoji(p.primaryType, p.primaryTypeDisplayName?.text, p.displayName?.text),
       photo: await downloadPhoto(p),
       reservable: p.reservable ?? null,
       why: whyLine(p, diet, budget, likes),

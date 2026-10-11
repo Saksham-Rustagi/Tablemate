@@ -1,26 +1,41 @@
 // Cuisine helpers for places.ts: emoji per Places primaryType, dislike → excluded types, like → search cuisine.
 
-const EMOJI: [RegExp, string][] = [
-  [/^italian_restaurant$/, "🍝"],
-  [/^pizza_restaurant$/, "🍕"],
-  [/^mexican_restaurant$/, "🌮"],
-  [/^indian_restaurant$/, "🍛"],
-  [/^(japanese|sushi)_restaurant$/, "🍣"],
-  [/^chinese_restaurant$/, "🥡"],
-  [/^thai_restaurant$/, "🍜"],
-  [/^(mediterranean|greek|middle_eastern)_restaurant$/, "🥙"],
-  [/^(american|hamburger)_restaurant$/, "🍔"],
-  [/^(bar_and_grill|brewery|bar)$/, "🍺"],
-  [/^(cafe|coffee_shop)$/, "☕"],
-  [/^bakery$/, "🥐"],
-  [/^(vegetarian|vegan)_restaurant$/, "🥗"],
-  [/^seafood_restaurant$/, "🦐"],
-  [/^steak_house$/, "🥩"],
+// Keywords are matched as whole "_"-separated tokens (optional plural s), first entry wins.
+const EMOJI: [string[], string][] = [
+  [["italian"], "🍝"],
+  [["pizza", "pizzeria"], "🍕"],
+  [["mexican", "taco", "taqueria"], "🌮"],
+  [["nepalese", "nepali", "himalayan", "tibetan", "momo"], "🥟"],
+  [["indian"], "🍛"],
+  [["japanese", "sushi"], "🍣"],
+  [["chinese"], "🥡"],
+  [["korean"], "🍲"],
+  [["thai", "vietnamese", "pho", "ramen"], "🍜"],
+  [["turkish", "mediterranean", "middle_eastern", "greek", "lebanese", "kebab", "falafel"], "🥙"],
+  [["bbq", "barbecue"], "🍖"],
+  [["chicken", "wing"], "🍗"],
+  [["american", "hamburger", "burger"], "🍔"],
+  [["breakfast", "brunch", "pancake"], "🥞"],
+  [["ice_cream"], "🍦"],
+  [["sandwich", "deli"], "🥪"],
+  [["bar_and_grill", "brewery", "bar", "pub"], "🍺"],
+  [["cafe", "coffee_shop", "coffee"], "☕"],
+  [["bakery"], "🥐"],
+  [["vegetarian", "vegan"], "🥗"],
+  [["seafood"], "🦐"],
+  [["steak_house", "steakhouse", "steak"], "🥩"],
 ];
+const EMOJI_RE: [RegExp, string][] = EMOJI.map(([kws, e]) => [new RegExp(`(^|_)(${kws.join("|")})s?(_|$)`), e]);
 
-export function cuisineEmoji(primaryType: string | null | undefined): string {
-  const t = primaryType ?? "";
-  for (const [re, e] of EMOJI) if (re.test(t)) return e;
+const norm = (s: string | null | undefined) => (s ?? "").toLowerCase().replace(/['’]/g, "").replace(/[^a-z0-9]+/g, "_");
+
+/** Cuisine emoji: matched on primaryType, then cuisineLabel ("Lebanese Restaurant"), then keywords in the name ("Momo's Master"). */
+export function cuisineEmoji(primaryType: string | null | undefined, cuisineLabel?: string | null, name?: string | null): string {
+  for (const s of [primaryType, cuisineLabel, name]) {
+    const t = norm(s);
+    if (!t) continue;
+    for (const [re, e] of EMOJI_RE) if (re.test(t)) return e;
+  }
   return "🍽️";
 }
 

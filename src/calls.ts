@@ -4,6 +4,7 @@ import { db, kvGet, nowIso } from "./db";
 import { emit, log } from "./events";
 import type { CallRequest, CallResult, CallStatus, CallsModule } from "./contracts";
 import { ensureRetellSynced, retellApi } from "./retell_sync";
+import { renderPhonePage } from "./retell_phone";
 
 export { ensureRetellSynced };
 
@@ -12,13 +13,26 @@ const STATUSES: CallStatus[] = ["booked", "full", "offered_other_time", "no_rese
 
 type CallRow = {
   id: string; plan_id: string; attempt: number; place_id: string; place_name: string; retell_call_id: string | null;
-  to_number: string; dialed: "demo" | "real"; status: string; result_json: string | null; transcript: string | null;
-  started_at: string | null; ended_at: string | null;
+  to_number: string; dialed: "demo" | "real" | "web"; status: string; result_json: string | null; transcript: string | null;
+  started_at: string | null; ended_at: string | null; web_json: string | null; ring_at: string | null;
 };
 
 export function initCalls(): void {
   db.exec(`CREATE TABLE IF NOT EXISTS call (id TEXT PRIMARY KEY, plan_id TEXT, attempt INT, place_id TEXT, place_name TEXT,
     retell_call_id TEXT UNIQUE, to_number TEXT, dialed TEXT, status TEXT, result_json TEXT, transcript TEXT, started_at TEXT, ended_at TEXT)`);
+  // Web-call columns (added later; ALTER fails harmlessly when they already exist).
+  for (const col of ["web_json TEXT", "ring_at TEXT"]) { try { db.exec(`ALTER TABLE call ADD COLUMN ${col}`); } catch { /* exists */ } }
+  // Re-arm ring timeouts for web calls left ringing by a restart.
+  for (const r of db.query("SELECT id, ring_at FROM call WHERE status = 'ringing'").all() as { id: string; ring_at: string | null }[]) {
+    armRingTimeout(r.id, ringTimeoutMs() - (Date.now() - Date.parse(r.ring_at || nowIso())));
+  }
+}
+
+/** RETELL_MODE = phone | web. Default: phone if a from-number exists (kv retell_from_number, or RETELL_FROM_NUMBER), else web. */
+export function retellMode(): "phone" | "web" {
+  const m = (process.env.RETELL_MODE || "").trim().toLowerCase();
+  if (m === "phone" || m === "web") return m;
+  return kvGet("retell_from_number") || process.env.RETELL_FROM_NUMBER ? "phone" : "web";
 }
 
 let resultHandler: ((r: CallResult) => void | Promise<void>) | null = null;
@@ -51,13 +65,31 @@ const numOrNull = (n: unknown) => { const v = Number(n); return Number.isFinite(
 const maskNum = (n: string) => (n ? "…" + n.slice(-4) : "?");
 
 // ---------- placing a call ----------
-export async function placeCall(req: CallRequest): Promise<{ ok: boolean; callId?: string; error?: string; dialed?: "demo" | "real" }> {
+function dynamicVars(req: CallRequest): Record<string, string> {
+  const allergies = req.allergies.filter(Boolean).join(", ");
+  return {
+    restaurant_name: req.option.name,
+    party_size: String(req.partySize),
+    time_12h: to12h(req.chosenTime),
+    day_label: toMin(req.chosenTime) >= 17 * 60 ? "tonight" : "today",
+    window_start_12h: to12h(req.windowStart),
+    window_end_12h: to12h(req.windowEnd),
+    booking_name: req.bookingName,
+    callback_number: req.callbackNumber || "none",
+    allergies: allergies || "none",
+    plan_id: req.planId,
+    attempt: String(req.attempt),
+  };
+}
+
+export async function placeCall(req: CallRequest): Promise<{ ok: boolean; callId?: string; error?: string; dialed?: "demo" | "real" | "web" }> {
   const { planId, attempt, option } = req;
   if (!Number.isInteger(attempt) || attempt < 1 || attempt > MAX_ATTEMPTS) return { ok: false, error: `attempt must be 1..${MAX_ATTEMPTS}` };
   const existing = db.query("SELECT attempt, place_id FROM call WHERE plan_id = ?").all(planId) as { attempt: number; place_id: string }[];
   if (existing.length >= MAX_ATTEMPTS) return { ok: false, error: `max ${MAX_ATTEMPTS} calls per plan reached` };
   if (existing.some((r) => r.attempt === attempt)) return { ok: false, error: `attempt ${attempt} already placed for this plan` };
   if (existing.some((r) => r.place_id === option.placeId)) return { ok: false, error: `${option.name} was already called for this plan` };
+  if (retellMode() === "web") return placeWebCall(req);
 
   // Rule 8: every call goes to the demo phone unless REAL_CALLS=1 AND the place is allowlisted.
   const allow = (process.env.REAL_CALL_ALLOWLIST || "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -73,20 +105,7 @@ export async function placeCall(req: CallRequest): Promise<{ ok: boolean; callId
   db.query("INSERT INTO call (id, plan_id, attempt, place_id, place_name, to_number, dialed, status) VALUES (?,?,?,?,?,?,?, 'dialing')")
     .run(id, planId, attempt, option.placeId, option.name, to, dialed);
 
-  const allergies = req.allergies.filter(Boolean).join(", ");
-  const vars: Record<string, string> = {
-    restaurant_name: option.name,
-    party_size: String(req.partySize),
-    time_12h: to12h(req.chosenTime),
-    day_label: toMin(req.chosenTime) >= 17 * 60 ? "tonight" : "today",
-    window_start_12h: to12h(req.windowStart),
-    window_end_12h: to12h(req.windowEnd),
-    booking_name: req.bookingName,
-    callback_number: req.callbackNumber || "none",
-    allergies: allergies || "none",
-    plan_id: planId,
-    attempt: String(attempt),
-  };
+  const vars = dynamicVars(req);
   const body = {
     from_number: from,
     to_number: to,
@@ -111,6 +130,98 @@ export async function placeCall(req: CallRequest): Promise<{ ok: boolean; callId
     callEvent(planId, attempt, "ended", `Call failed: ${(e as Error).message}`);
     return { ok: false, error: (e as Error).message, dialed };
   }
+}
+
+// ---------- web mode (no phone number yet: the "restaurant" answers in a browser at /retell/phone) ----------
+type WebStart = { agent_id: string; metadata: { plan_id: string; attempt: number }; retell_llm_dynamic_variables: Record<string, string>; booking_name: string; party_size: number; time_12h: string };
+
+const ringTimeoutMs = () => Number(process.env.TM_RING_TIMEOUT_MS || 90_000);
+const noAnswer = (note: string) => ({ status: "no_answer" as const, time: null, partySize: null, name: null, note });
+
+function armRingTimeout(id: string, ms: number) {
+  const t = setTimeout(() => endRinging(id, "unanswered", "nobody answered the demo line"), Math.max(0, ms));
+  (t as any).unref?.();
+}
+
+/** ringing → declined/unanswered, delivering no_answer. The status guard makes it once-only (and a no-op once answered). */
+function endRinging(id: string, status: "declined" | "unanswered", note: string): boolean {
+  const changed = db.query("UPDATE call SET status = ?, ended_at = ? WHERE id = ? AND status = 'ringing'").run(status, nowIso(), id).changes;
+  if (changed !== 1) return false;
+  const row = db.query("SELECT * FROM call WHERE id = ?").get(id) as CallRow;
+  callEvent(row.plan_id, row.attempt, "ended", `${row.place_name}: ${status === "declined" ? "declined" : "no answer"} (demo line)`);
+  deliver(row, noAnswer(note), status);
+  return true;
+}
+
+async function placeWebCall(req: CallRequest): Promise<{ ok: boolean; callId?: string; error?: string; dialed?: "web" }> {
+  const { planId, attempt, option } = req;
+  const agentId = kvGet("retell_agent_id");
+  if (!agentId) return { ok: false, error: "no Retell agent (run scripts/sync_retell.ts)", dialed: "web" };
+  // The Retell web call is created only when someone answers: its access token expires soon after creation.
+  const start: WebStart = {
+    agent_id: agentId,
+    metadata: { plan_id: planId, attempt },
+    retell_llm_dynamic_variables: dynamicVars(req),
+    booking_name: req.bookingName,
+    party_size: req.partySize,
+    time_12h: to12h(req.chosenTime),
+  };
+  const id = `${planId}-${attempt}`;
+  db.query("INSERT INTO call (id, plan_id, attempt, place_id, place_name, to_number, dialed, status, web_json, ring_at) VALUES (?,?,?,?,?, 'web', 'web', 'ringing', ?, ?)")
+    .run(id, planId, attempt, option.placeId, option.name, JSON.stringify(start), nowIso());
+  armRingTimeout(id, ringTimeoutMs());
+  callEvent(planId, attempt, "dialing", `Calling ${option.name} (demo line)…`);
+  log.info(`📞 Web call ringing: ${option.name} [plan ${planId} attempt ${attempt}]`);
+  return { ok: true, callId: id, dialed: "web" };
+}
+
+const isLocal = (req: Request) => {
+  if (req.headers.get("cf-connecting-ip") || req.headers.get("x-forwarded-for")) return false; // came through the tunnel
+  const host = (req.headers.get("host") || "").toLowerCase().replace(/:\d+$/, "");
+  return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+};
+
+function pendingWebCall() {
+  const row = db.query("SELECT * FROM call WHERE dialed = 'web' AND status = 'ringing' ORDER BY ring_at DESC LIMIT 1").get() as CallRow | null;
+  if (!row) return { call: null };
+  const s = JSON.parse(row.web_json || "{}") as WebStart;
+  return { call: { callId: row.id, restaurant: row.place_name, name: s.booking_name, partySize: s.party_size, time: s.time_12h, ringingSince: row.ring_at } };
+}
+
+async function onAnswer(req: Request): Promise<Response> {
+  const body: any = await req.json().catch(() => ({}));
+  const id = String(body?.callId ?? "");
+  // Claim the ringing call atomically so a double click can't create two Retell calls.
+  if (db.query("UPDATE call SET status = 'answering' WHERE id = ? AND status = 'ringing'").run(id).changes !== 1) return json({ error: "not ringing" }, 409);
+  const row = db.query("SELECT * FROM call WHERE id = ?").get(id) as CallRow;
+  const s = JSON.parse(row.web_json || "{}") as WebStart;
+  try {
+    const r = await retellApi("POST", "/v3/create-web-call", {
+      agent_id: s.agent_id, agent_version: "latest", metadata: s.metadata, retell_llm_dynamic_variables: s.retell_llm_dynamic_variables,
+    });
+    const callId = r.json?.call_id as string | undefined;
+    const accessToken = r.json?.access_token as string | undefined;
+    if (r.status < 200 || r.status >= 300 || !callId || !accessToken) throw new Error(`create-web-call ${r.status}: ${String(r.json?.message ?? r.json?.error_message ?? "").slice(0, 160)}`);
+    db.query("UPDATE call SET retell_call_id = ?, status = 'answered', started_at = ? WHERE id = ?").run(callId, nowIso(), id);
+    callEvent(row.plan_id, row.attempt, "started", `${row.place_name} picked up (demo line)`);
+    return json({ accessToken, callId, transport: r.json?.transport, iceServers: r.json?.ice_servers, expiresAt: r.json?.expires_at });
+  } catch (e) {
+    db.query("UPDATE call SET status = 'ringing' WHERE id = ? AND status = 'answering'").run(id); // still ringing; timeout applies
+    if (Date.now() - Date.parse(row.ring_at || nowIso()) >= ringTimeoutMs()) endRinging(id, "unanswered", "nobody answered the demo line");
+    log.error(`Web call answer failed for ${row.place_name}`, e);
+    return json({ error: (e as Error).message }, 502);
+  }
+}
+
+async function onDecline(req: Request): Promise<Response> {
+  const body: any = await req.json().catch(() => ({}));
+  return endRinging(String(body?.callId ?? ""), "declined", "declined on the demo line") ? json({ ok: true }) : json({ error: "not ringing" }, 409);
+}
+
+async function onDiag(req: Request): Promise<Response> {
+  const d: any = await req.json().catch(() => ({}));
+  log.info(`restaurant phone: ${String(d.ev ?? "?").slice(0, 40)}${d.callId ? ` ${String(d.callId).slice(0, 60)}` : ""}${d.msg ? " " + String(d.msg).slice(0, 300) : ""}`);
+  return new Response("ok");
 }
 
 // ---------- result delivery (exactly once per plan+attempt) ----------
@@ -248,6 +359,16 @@ async function onWebhook(req: Request): Promise<Response> {
 }
 
 export async function retellRoutes(req: Request, url: URL): Promise<Response | null> {
+  const p = url.pathname;
+  if (p === "/retell/phone" || p.startsWith("/retell/phone/")) {
+    if (!isLocal(req)) return new Response("forbidden", { status: 403 });
+    if (p === "/retell/phone" && req.method === "GET") return new Response(renderPhonePage(), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+    if (p === "/retell/phone/pending" && req.method === "GET") return json(pendingWebCall());
+    if (p === "/retell/phone/answer" && req.method === "POST") return onAnswer(req);
+    if (p === "/retell/phone/decline" && req.method === "POST") return onDecline(req);
+    if (p === "/retell/phone/diag" && req.method === "POST") return onDiag(req);
+    return null;
+  }
   if (req.method !== "POST") return null;
   if (url.pathname === "/retell/tool/report_result") return onReportResult(req);
   if (url.pathname === "/retell/webhook") return onWebhook(req);
