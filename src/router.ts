@@ -1,10 +1,9 @@
-// Router: dedupe, echo filter, TEST_SENDERS allowlist, debounce, dispatch. Never awaits handlers inside the stream loop.
+// Router: enrolled-group filter, echo filter, dedupe, 8 s debounce per chat, dispatch. Never awaits handlers inside the stream loop.
 import type { Message, Space } from "spectrum-ts";
-import { config, isAllowedLocalSender, isAsha, isKinLine, mask, normalizeHandle } from "./config";
-import { personByHandle, seenMessage } from "./db";
-import { log } from "./events";
-import { onFamilyToAsha, onUnknownToAsha, onAshaToKin, onFamilyToKin, onFamilyPhotoToKin, onAshaVoiceToKin, type Turn } from "./kin";
-import { isAudio, isImage, type InPhoto } from "./photos";
+import { config, isEnrolledChat, isTablemateLine, mask, memberByHandle, normalizeHandle } from "./config";
+import { saveMessage, seenMessage, type MsgRow } from "./db";
+import { emit, log } from "./events";
+import { onGroupTurn } from "./brain";
 import type { Transport } from "./transport";
 
 const seen = new Set<string>();
@@ -15,86 +14,73 @@ function dedupe(id: string): boolean {
   return false;
 }
 
-type Buf = { turn: Turn; timer: ReturnType<typeof setTimeout>; first: number };
+type Buf = { msgs: MsgRow[]; timer: ReturnType<typeof setTimeout> | null; first: number };
 const buffers = new Map<string, Buf>();
-export let ignoredCount = 0;
+const pending = new Set<Promise<void>>();
 
-function flush(key: string) {
-  const b = buffers.get(key);
+function flush(chatId: string) {
+  const b = buffers.get(chatId);
   if (!b) return;
-  buffers.delete(key);
-  const person = isAsha(b.turn.from) ? null : personByHandle(b.turn.from);
-  const p = person ? onFamilyToAsha(person, b.turn) : onUnknownToAsha(b.turn);
-  p.catch((e) => log.error("turn handler failed", e));
+  buffers.delete(chatId);
+  const p = onGroupTurn(chatId, b.msgs).catch((e) => log.error("group turn failed", e));
+  pending.add(p);
+  void p.finally(() => pending.delete(p));
 }
 
-function buffer(from: string, chatId: string | null, isGroup: boolean, id: string, text: string, att?: Turn["attachments"][number]) {
-  const key = `${from}|${chatId ?? ""}`;
-  let b = buffers.get(key);
-  if (!b) {
-    b = { turn: { from, chatId, isGroup, texts: [], ids: [], at: new Date(), attachments: [] }, timer: setTimeout(() => {}, 0), first: Date.now() };
-    buffers.set(key, b);
-  }
-  clearTimeout(b.timer);
-  if (text) b.turn.texts.push(text);
-  if (att) b.turn.attachments.push(att);
-  b.turn.ids.push(id);
-  const waited = Date.now() - b.first;
-  const wait = Math.max(0, Math.min(config.debounceMs, 45_000 - waited));
-  b.timer = setTimeout(() => flush(key), wait);
+function buffer(m: MsgRow) {
+  let b = buffers.get(m.chat_id);
+  if (!b) { b = { msgs: [], timer: null, first: Date.now() }; buffers.set(m.chat_id, b); }
+  if (b.timer) clearTimeout(b.timer);
+  b.msgs.push(m);
+  const debounce = Number(process.env.TM_DEBOUNCE_MS ?? config.debounceMs);
+  if (debounce <= 0) { flush(m.chat_id); return; }
+  const wait = Math.max(0, Math.min(debounce, 45_000 - (Date.now() - b.first)));
+  b.timer = setTimeout(() => flush(m.chat_id), wait);
+}
+
+/** Wait until every buffered burst has been handled (tests and /dash/simulate use this). */
+export async function drain() {
+  for (const k of [...buffers.keys()]) { const b = buffers.get(k); if (b?.timer) clearTimeout(b.timer); flush(k); }
+  while (pending.size) await Promise.all([...pending]);
 }
 
 export async function route(space: Space | null, message: Message) {
   if (message.direction === "outbound") return;
   const c0: any = message.content;
   if (c0.type === "read" || c0.type === "typing") return;
-  if (dedupe(message.id)) return;
-  const from = normalizeHandle(message.sender?.id);
 
   if (message.platform === "local_imessage") {
-    if (isKinLine(from)) return; // echo: Kin's own cloud messages also land in Asha's chat.db
-    if (!isAllowedLocalSender(from)) { ignoredCount++; log.info(`(ignored a local message from a non-test sender ${mask(from)}; ${ignoredCount} so far${config.allowSenders.length ? "" : " · TEST_SENDERS is empty, so nobody is let through"})`); return; }
-    const isGroup = (space as any)?.type === "group";
-    if (isGroup) { log.info(`group message from ${mask(from)}: G1 group mode not enabled in v1`); return; }
+    const chatId = space?.id ?? "";
+    // Spec §5.6: anything outside the enrolled group chats is dropped before it is logged or stored.
+    if (!isEnrolledChat(chatId)) return;
+    const from = normalizeHandle(message.sender?.id);
+    if (isTablemateLine(from)) return; // echo of our own cloud line
+    if (dedupe(message.id)) return;
+    const person = memberByHandle(from);
+    if (!person) { log.info(`group message from a non-member ${mask(from)} ignored`); return; }
     const c = c0.type === "reply" ? c0.content : c0;
-    if (c.type === "text") buffer(from, space?.id ?? null, false, message.id, c.text);
-    // Keep a read() handle so onFamilyToAsha can look at photos (throws if not downloaded to the Mac; handled there).
-    else if (c.type === "attachment" || c.type === "voice") buffer(from, space?.id ?? null, false, message.id, "", { name: c.name ?? "file", mimeType: c.mimeType ?? "", read: typeof c.read === "function" ? () => c.read() : undefined });
+    if (c.type !== "text" || !String(c.text ?? "").trim()) return;
+    const row: MsgRow = { id: message.id, chat_id: chatId, handle: person.handle, name: person.name, text: String(c.text), at: new Date(message.timestamp ?? Date.now()).toISOString() };
+    saveMessage(row);
+    emit({ kind: "message", chatId, name: person.name, text: row.text });
+    buffer(row);
     return;
   }
 
   if (message.platform === "imessage") {
-    const unwrap = (c: any): any[] => c.type === "group" ? c.items.flatMap(unwrap) : c.type === "reply" ? unwrap(c.content) : [c];
-    const items = unwrap(c0);
-    const handle = async (c: any): Promise<void> => {
-      if (isAsha(from)) {
-        if (c.type === "voice" || (c.type === "attachment" && isAudio(c.mimeType, c.name))) {
-          return onAshaVoiceToKin(await c.read(), c.mimeType ?? "audio/x-caf", message.id);
-        }
-        return onAshaToKin({ type: c.type, text: c.text, emoji: c.emoji, targetId: c.target?.id });
-      }
-      const person = personByHandle(from);
-      if (!person) { log.info(`cloud message from unknown ${mask(from)} ignored`); return; }
-      if (c.type === "text") return onFamilyToKin(person, from, c.text, message.id);
-      log.info(`cloud ${c.type} from ${person.name} (not handled yet)`);
-    };
-    const run = async () => {
-      // Family photo(s), alone or grouped with a caption → ONE photo-memory call.
-      const person = isAsha(from) ? null : personByHandle(from);
-      const imgs = items.filter((c) => c.type === "attachment" && isImage(c.mimeType, c.name));
-      if (person && imgs.length) {
-        const caption = items.filter((c) => c.type === "text").map((c) => c.text).join("\n");
-        const photos: InPhoto[] = [];
-        for (const c of imgs) {
-          try { photos.push({ bytes: await c.read(), mimeType: c.mimeType ?? "", name: c.name ?? "photo" }); }
-          catch (e) { log.warn(`photo from ${person.name} unreadable: ${(e as any)?.message ?? e}`); }
-        }
-        return onFamilyPhotoToKin(person, from, photos, caption, message.id);
-      }
-      for (const it of items) await handle(it);
-    };
-    run().catch((e) => log.error("cloud handler failed", e));
+    // P2: cloud DMs to Tablemate's line are logged only.
+    if (dedupe(message.id)) return;
+    const from = normalizeHandle(message.sender?.id);
+    const person = memberByHandle(from);
+    log.info(`cloud DM from ${person ? person.name : mask(from)} (${c0.type}) — not handled (P2)`);
   }
+}
+
+/** Build the same Message shape the local provider produces (used by /dash/simulate and tests). */
+export function fakeLocalMessage(chatId: string, handle: string, text: string, id = `sim_${crypto.randomUUID().slice(0, 8)}`): [Space, Message] {
+  const space = { id: chatId, type: "group" } as unknown as Space;
+  const message = { id, platform: "local_imessage", direction: "inbound", sender: { id: handle }, space, timestamp: new Date(), content: { type: "text", text } } as unknown as Message;
+  return [space, message];
 }
 
 /** Supervisor: restart the merged stream if it ends or throws (a local watcher error can end it). */

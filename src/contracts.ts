@@ -100,7 +100,8 @@ export type CallRequest = {
 export interface CallsModule {
   initCalls(): void; // CREATE TABLE IF NOT EXISTS call(...)
   /** Enforces: REAL_CALLS / DEMO_RESTAURANT_PHONE redirect, max 3 attempts per plan, never the same place twice per plan, open-hours check is the caller's job. */
-  placeCall(req: CallRequest): Promise<{ ok: boolean; callId?: string; error?: string; dialed?: "demo" | "real" }>;
+  /** RETELL_MODE=web (no phone number yet): records a ringing call answered at /retell/phone; dialed = "web". */
+  placeCall(req: CallRequest): Promise<{ ok: boolean; callId?: string; error?: string; dialed?: "demo" | "real" | "web" }>;
   /** Handles POST /retell/tool/report_result and POST /retell/webhook (signature-verified). Returns null for other paths. */
   retellRoutes(req: Request, url: URL): Promise<Response | null>;
   /** plan.ts registers this; calls.ts invokes it exactly once per (planId, attempt). */

@@ -1,9 +1,9 @@
-// Transport: one Spectrum process, two providers. Cloud = Kin's own line; local = Asha's Mac (send AS Asha).
-import { Spectrum, app, edit, voice, type AppLayout, type Message, type Space } from "spectrum-ts";
-import { imessage } from "spectrum-ts/providers/imessage";
+// Transport: one Spectrum process, two providers. Cloud = Tablemate's own line (cards, edits, effects, attachments).
+// Local = Saksham's Mac, READ ONLY: Tablemate never sends through it (there is no local send method at all).
+import { Spectrum, app, attachment, edit, type AppLayout, type Message, type Space } from "spectrum-ts";
+import { imessage, effect } from "spectrum-ts/providers/imessage";
 import { localIMessage } from "@spectrum-ts/imessage-local";
-import { readFileSync } from "fs";
-import { config, mask, normalizeHandle } from "./config";
+import { config, isEnrolledChat, mask, normalizeHandle } from "./config";
 import { log } from "./events";
 
 export type CardRef = { id: string; msg?: Message; session?: unknown };
@@ -12,8 +12,8 @@ export interface Transport {
   sendText(to: string, text: string): Promise<string | undefined>;
   sendCard(to: string, url: string, layout: AppLayout): Promise<CardRef | undefined>;
   editCard(to: string, ref: CardRef, url: string, layout: AppLayout): Promise<boolean>;
-  sendVoice(to: string, file: string, durationSec: number): Promise<boolean>;
-  sendAsAsha(handle: string, chatId: string | null, text: string): Promise<boolean>;
+  sendEffect(to: string, text: string): Promise<boolean>;
+  sendAttachment(to: string, bytes: Uint8Array, name: string, mimeType: string): Promise<boolean>;
   messages(): AsyncIterable<[Space | null, Message]>;
   health(): { local: boolean; cloud: boolean };
   stop(): Promise<void>;
@@ -27,9 +27,7 @@ export async function createSpectrumTransport(): Promise<Transport> {
     options: { logLevel: (process.env.SPECTRUM_LOG as any) || "warn" },
   });
   const im = imessage(sp);
-  const local = localIMessage(sp);
   const cloudSpaces = new Map<string, Space>();
-  const localSpaces = new Map<string, Space>();
   const health = { local: true, cloud: true };
 
   async function cloudSpace(to: string): Promise<Space> {
@@ -63,30 +61,24 @@ export async function createSpectrumTransport(): Promise<Transport> {
         return true;
       } catch (e) { log.error(`card edit failed (${ref.id})`, e); return false; }
     },
-    async sendVoice(to, file, durationSec) {
+    async sendEffect(to, text) {
       try {
-        await (await cloudSpace(to)).send(voice(readFileSync(file), { name: "kin.m4a", mimeType: "audio/mp4", duration: durationSec } as any));
+        await (await cloudSpace(to)).send(effect(text, imessage.effect.message.celebration));
         return true;
-      } catch (e) { log.error("voice send failed", e); return false; }
+      } catch (e) { log.error(`effect send to ${mask(to)} failed`, e); return false; }
     },
-    async sendAsAsha(handle, chatId, text) {
+    async sendAttachment(to, bytes, name, mimeType) {
       try {
-        const h = normalizeHandle(handle);
-        let s = (chatId && localSpaces.get(chatId)) || localSpaces.get(h);
-        if (!s) {
-          s = chatId ? await local.space.get(chatId).catch(() => undefined as any) : undefined;
-          if (!s) s = await local.space.create(await local.user(h));
-          localSpaces.set(h, s!);
-        }
-        await s!.send(text);
-        health.local = true;
+        await (await cloudSpace(to)).send(attachment(Buffer.from(bytes), { name, mimeType }));
         return true;
-      } catch (e) { log.error(`send as Asha to ${mask(handle)} failed`, e); return false; }
+      } catch (e) { log.error(`attachment send to ${mask(to)} failed`, e); return false; }
     },
     messages() {
       return (async function* () {
         for await (const [space, message] of sp.messages) {
-          if (message.platform === "local_imessage") localSpaces.set(space.id, space);
+          // Privacy (spec §5.6): the Mac is Saksham's real Apple ID. Drop every local message outside the
+          // enrolled group chats BEFORE anything logs it.
+          if (message.platform === "local_imessage" && !isEnrolledChat(space?.id)) continue;
           yield [space, message] as [Space, Message];
         }
       })();
@@ -96,17 +88,19 @@ export async function createSpectrumTransport(): Promise<Transport> {
   };
 }
 
-/** Fake transport for replay tests: records everything, never touches the network. */
+export type FakeSend = { provider: "cloud"; kind: "text" | "card" | "edit" | "effect" | "attachment"; to: string; text?: string; url?: string; layout?: AppLayout; name?: string };
+
+/** Fake transport for replay tests: records every send, never touches the network. */
 export function createFakeTransport() {
-  const sent: { kind: string; to: string; text?: string; url?: string; layout?: AppLayout }[] = [];
+  const sent: FakeSend[] = [];
   let n = 0;
-  const t: Transport & { sent: typeof sent } = {
+  const t: Transport & { sent: FakeSend[] } = {
     sent,
-    async sendText(to, text) { sent.push({ kind: "text", to, text }); return `fake-${++n}`; },
-    async sendCard(to, url, layout) { sent.push({ kind: "card", to, url, layout }); return { id: `fake-card-${++n}` }; },
-    async editCard(to, _ref, url, layout) { sent.push({ kind: "edit", to, url, layout }); return true; },
-    async sendVoice(to) { sent.push({ kind: "voice", to }); return true; },
-    async sendAsAsha(handle, _chat, text) { sent.push({ kind: "as_asha", to: handle, text }); return true; },
+    async sendText(to, text) { sent.push({ provider: "cloud", kind: "text", to, text }); return `fake-${++n}`; },
+    async sendCard(to, url, layout) { sent.push({ provider: "cloud", kind: "card", to, url, layout }); return { id: `fake-card-${++n}` }; },
+    async editCard(to, _ref, url, layout) { sent.push({ provider: "cloud", kind: "edit", to, url, layout }); return true; },
+    async sendEffect(to, text) { sent.push({ provider: "cloud", kind: "effect", to, text }); return true; },
+    async sendAttachment(to, _bytes, name) { sent.push({ provider: "cloud", kind: "attachment", to, name }); return true; },
     messages() { return (async function* () { /* replay pushes directly into the router */ })(); },
     health: () => ({ local: true, cloud: true }),
     async stop() {},

@@ -1,35 +1,50 @@
-// Event bus for the "Kin's thinking" dashboard (SSE) and the console log.
-export type GraphNode = { id: string; label: string; kind: "asha" | "person" | "pet" | "place" | "event" | "thing"; photo?: string | null; relation?: string | null; memories?: number };
-export type GraphLink = { source: string; target: string; rel: string };
+// Event bus for the "Tablemate's thinking" dashboard (polled via /dash/events) and the console log.
+import type { Fact } from "./contracts";
+
 export type DashEvent =
   | { kind: "log"; at: string; level: "info" | "warn" | "error"; text: string }
-  | { kind: "decision"; at: string; from: string; preview: string; rules: string[]; action: "card" | "protect" | "quiet" | "hold" | "reply" | "memory" | "reminder" | "alert"; memoryId?: string | null; cardId?: string | null; ms?: number; highlight?: string[] }
-  | { kind: "graph"; op: "add_node"; node: GraphNode }
-  | { kind: "graph"; op: "add_link"; link: GraphLink }
-  | { kind: "graph"; op: "highlight"; ids: string[] }
+  | { kind: "decision"; at: string; from: string; preview: string; rules: string[]; action: string; ms?: number }
+  | { kind: "fact"; fact: Fact; forgotten?: boolean }
+  | { kind: "filter"; planId: string; name: string; reason: string }
+  | { kind: "call"; planId: string; attempt: number; phase: "dialing" | "started" | "ended" | "result"; detail: string }
+  | { kind: "transcript"; planId: string; attempt: number; role: "agent" | "restaurant"; text: string }
+  | { kind: "plan"; planId: string; from: string; to: string; why: string }
+  | { kind: "vote"; planId: string; handle: string; name: string; optionIdx: number; via: "card" | "text" }
+  | { kind: "rsvp"; planId: string; handle: string; name: string; status: "in" | "out"; timePref: string | null; via: "card" | "text" }
+  | { kind: "message"; chatId: string; name: string; text: string }
   | { kind: "health"; local: boolean; cloud: boolean; tunnel: boolean; gemini: { used: number; limit: number } };
 
-type Listener = (e: DashEvent) => void;
+export type Stamped = DashEvent & { seq: number; ts: string };
+
+type Listener = (e: Stamped) => void;
 const listeners = new Set<Listener>();
-const recent: DashEvent[] = [];
+const recent: Stamped[] = [];
+let seq = 0;
 
 export function emit(e: DashEvent) {
-  recent.push(e);
-  if (recent.length > 80) recent.shift();
+  const s = { ...e, seq: ++seq, ts: new Date().toISOString() } as Stamped;
+  recent.push(s);
+  if (recent.length > 400) recent.shift();
   for (const l of listeners) {
-    try { l(e); } catch { /* ignore */ }
+    try { l(s); } catch { /* ignore */ }
   }
 }
 export function subscribe(l: Listener): () => void {
   listeners.add(l);
   return () => listeners.delete(l);
 }
-export function recentEvents(): DashEvent[] {
-  return recent.filter((e) => e.kind === "decision" || e.kind === "log").slice(-40);
+export function eventsSince(since: number): Stamped[] {
+  return recent.filter((e) => e.seq > since && e.kind !== "health");
+}
+export function lastSeq(): number {
+  return seq;
+}
+export function clearEvents() {
+  recent.length = 0;
 }
 
 const now = () => new Date().toISOString();
-const stamp = () => new Date().toLocaleTimeString("en-US", { timeZone: process.env.TZ || "America/New_York", hour12: false });
+const stamp = () => new Date().toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false });
 
 export const log = {
   info(text: string) { console.log(`[${stamp()}] ${text}`); emit({ kind: "log", at: now(), level: "info", text }); },

@@ -5,6 +5,7 @@
   "dependencies": {
     "@google/genai": ">=2.24 <3",
     "@spectrum-ts/imessage-local": "^12.10.1",
+    "retell-sdk": "^6.2.5",
     "spectrum-ts": "^12.10.1"
   },
   "devDependencies": {

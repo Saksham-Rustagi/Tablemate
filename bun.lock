@@ -7,6 +7,7 @@
       "dependencies": {
         "@google/genai": ">=2.24 <3",
         "@spectrum-ts/imessage-local": "^12.10.1",
+        "retell-sdk": "^6.2.5",
         "spectrum-ts": "^12.10.1",
       },
       "devDependencies": {
@@ -521,6 +522,8 @@
     "require-in-the-middle": ["require-in-the-middle@8.0.1", "", { "dependencies": { "debug": "^4.3.5", "module-details-from-path": "^1.0.3" } }, "sha512-QT7FVMXfWOYFbeRBF6nu+I6tr2Tf3u0q8RIEjNob/heKY/nh7drD/k7eeMFmSQgnTtCzLDcCu/XEnpW2wk4xCQ=="],
 
     "require-main-filename": ["require-main-filename@2.0.0", "", {}, "sha512-NKN5kMDylKuldxYLSUfrbo5Tuzh4hd+2E8NPPX02mZtn1VuREQToYe/ZdlJy+J3uCpfaiGF05e7B8W0iXbQHmg=="],
+
+    "retell-sdk": ["retell-sdk@6.2.5", "", {}, "sha512-9+KToTthK3EUf6+iJ4hlGqNd+fTQ0GL/Bs2YIhhEl5kkMQCLuAhbjSLs6//IgFE7OfkkFBUnbaK3AVyDS0Q1yg=="],
 
     "retry": ["retry@0.13.1", "", {}, "sha512-XQBQ3I8W1Cge0Seh+6gjj03LbmRFWuoszgK9ooCpwYIrhhoO80pfq4cUkU5DkknwfOfFteRwlZ56PYOGYyFWdg=="],
 

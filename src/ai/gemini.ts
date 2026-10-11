@@ -1,18 +1,16 @@
-// Gemini (REST, structured JSON output). Every call: 8 s timeout, 1 retry, daily budget; null on failure => rules-only fallback.
+// Gemini (REST, structured JSON output). Every call: 8 s timeout, 1 retry, daily budget; null on failure => regex fallback.
 import { config } from "../config";
 import { kvGet, kvSet } from "../db";
 import { log } from "../events";
 
 const URL_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
-export const RULES = `You are part of Kin, a gentle helper for ${config.ashaName}, a 78-year-old woman living with memory loss.
+export const RULES = `You read a friends' group chat for Tablemate, an assistant that helps the group book a table.
 Rules you must follow:
 - Output ONLY JSON matching the schema.
-- Never invent facts. Use only memory ids, names and facts present in the input. If unsure, return null.
-- Never write "remember", "do you remember", "recall", or any question that tests her memory. Use statements.
-- Short sentences, warm and adult tone, never childish. Plain words.
-- Never give medical, legal or financial advice. Never suggest sending money, gift cards or codes.
-- Use "person living with memory loss" language; never "sufferer", "senile", "victim".`;
+- Never invent facts. Every fact quote must be the exact words from one message, copied character for character.
+- Only use handles that appear in the input.
+- If unsure, leave a list empty or a field null. Plain code decides every action; you only extract.`;
 
 function budgetKey() {
   const pt = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
@@ -32,7 +30,7 @@ export async function gen<T>(name: string, user: string | any[], schema: object,
   const body = {
     systemInstruction: { parts: [{ text: opts.system ?? RULES }] },
     contents: [{ role: "user", parts }],
-    generationConfig: { responseMimeType: "application/json", responseSchema: schema, temperature: 0.3 },
+    generationConfig: { responseMimeType: "application/json", responseSchema: schema, temperature: 0.2 },
   };
   for (let attempt = 0; attempt < 2; attempt++) {
     const t0 = Date.now();
@@ -59,86 +57,52 @@ export async function gen<T>(name: string, user: string | any[], schema: object,
 }
 
 // ---------------- schemas (REST OpenAPI subset) ----------------
-const S = (type: string, extra: object = {}) => ({ type, ...extra });
+export const S = (type: string, extra: object = {}) => ({ type, ...extra });
 
-export type AssessCompose = {
-  isTrivial: boolean; questionForAsha: boolean; isStressful: boolean; needsSummary: boolean;
-  mentions: { name: string; kind: string }[];
-  scam: { score: number; signals: string[]; claimsToBe: string | null };
-  summary: string | null; memory_id: string | null; memory_line: string | null; replies: string[]; calm_note: string | null;
-  photo_caption?: string | null;
+export type GroupTurn = {
+  intent: {
+    is_plan: boolean; confidence: number; meal: "breakfast" | "lunch" | "dinner" | "drinks" | "food" | null;
+    day: string | null; time_window: { start: string | null; end: string | null } | null;
+    area_hint: string | null; organizer_handle: string | null;
+  };
+  facts: { handle: string; kind: "diet" | "allergy" | "dislike" | "like" | "budget" | "availability"; value: string; quote: string; msg_index: number }[];
+  text_votes: { handle: string; option_number: number }[];
+  rsvps: { handle: string; status: "in" | "out"; time_pref: string | null }[];
 };
-export const assessSchema = S("OBJECT", {
-  properties: {
-    isTrivial: S("BOOLEAN"), questionForAsha: S("BOOLEAN"), isStressful: S("BOOLEAN"), needsSummary: S("BOOLEAN"),
-    mentions: S("ARRAY", { items: S("OBJECT", { properties: { name: S("STRING"), kind: S("STRING", { enum: ["person", "pet", "place", "event", "thing"] }) }, required: ["name", "kind"] }) }),
-    scam: S("OBJECT", { properties: { score: S("INTEGER"), signals: S("ARRAY", { items: S("STRING", { enum: ["money", "giftcard", "wire", "crypto", "urgency", "secrecy", "link", "code", "new_number_claim", "impersonation"] }) }), claimsToBe: S("STRING", { nullable: true }) }, required: ["score", "signals"] }),
-    summary: S("STRING", { nullable: true }),
-    memory_id: S("STRING", { nullable: true }),
-    memory_line: S("STRING", { nullable: true }),
-    replies: S("ARRAY", { items: S("STRING") }),
-    calm_note: S("STRING", { nullable: true }),
-    photo_caption: S("STRING", { nullable: true }),
-  },
-  required: ["isTrivial", "questionForAsha", "isStressful", "needsSummary", "mentions", "scam", "memory_id", "memory_line", "replies"],
-});
 
-export type FamilyUnderstanding = {
-  intent: "memory" | "reminder" | "urgent" | "alert_safe" | "alert_scam" | "about_me" | "forget" | "other";
-  entities: { name: string; kind: string }[];
-  edges: { src: string; rel: string; dst: string; label: string }[];
-  memories: { about: string; text: string; happened_on: string | null }[];
-  reminder: { text: string; due_local: string | null; daily: boolean; in_minutes: number | null } | null;
-  confirmation: string;
-};
-export const familySchema = S("OBJECT", {
+export const groupTurnSchema = S("OBJECT", {
   properties: {
-    intent: S("STRING", { enum: ["memory", "reminder", "urgent", "alert_safe", "alert_scam", "about_me", "forget", "other"] }),
-    entities: S("ARRAY", { items: S("OBJECT", { properties: { name: S("STRING"), kind: S("STRING", { enum: ["person", "pet", "place", "event", "thing"] }) }, required: ["name", "kind"] }) }),
-    edges: S("ARRAY", { items: S("OBJECT", { properties: { src: S("STRING"), rel: S("STRING"), dst: S("STRING"), label: S("STRING") }, required: ["src", "rel", "dst", "label"] }) }),
-    memories: S("ARRAY", { items: S("OBJECT", { properties: { about: S("STRING"), text: S("STRING"), happened_on: S("STRING", { nullable: true }) }, required: ["about", "text"] }) }),
-    reminder: S("OBJECT", { nullable: true, properties: { text: S("STRING"), due_local: S("STRING", { nullable: true }), daily: S("BOOLEAN"), in_minutes: S("INTEGER", { nullable: true }) }, required: ["text", "daily"] }),
-    confirmation: S("STRING"),
+    intent: S("OBJECT", {
+      properties: {
+        is_plan: S("BOOLEAN"),
+        confidence: S("NUMBER"),
+        meal: S("STRING", { nullable: true, enum: ["breakfast", "lunch", "dinner", "drinks", "food"] }),
+        day: S("STRING", { nullable: true, description: "YYYY-MM-DD in America/New_York" }),
+        time_window: S("OBJECT", { nullable: true, properties: { start: S("STRING", { nullable: true, description: "HH:MM 24h" }), end: S("STRING", { nullable: true, description: "HH:MM 24h" }) } }),
+        area_hint: S("STRING", { nullable: true }),
+        organizer_handle: S("STRING", { nullable: true }),
+      },
+      required: ["is_plan", "confidence", "meal", "day", "organizer_handle"],
+    }),
+    facts: S("ARRAY", {
+      items: S("OBJECT", {
+        properties: {
+          handle: S("STRING"),
+          kind: S("STRING", { enum: ["diet", "allergy", "dislike", "like", "budget", "availability"] }),
+          value: S("STRING", { description: "short, lower-case: vegetarian, peanuts, sushi, cheap, not after 20:30" }),
+          quote: S("STRING", { description: "exact words copied from the message" }),
+          msg_index: S("INTEGER", { description: "index of the NEW message the quote comes from" }),
+        },
+        required: ["handle", "kind", "value", "quote", "msg_index"],
+      }),
+    }),
+    text_votes: S("ARRAY", { items: S("OBJECT", { properties: { handle: S("STRING"), option_number: S("INTEGER") }, required: ["handle", "option_number"] }) }),
+    rsvps: S("ARRAY", {
+      items: S("OBJECT", {
+        properties: { handle: S("STRING"), status: S("STRING", { enum: ["in", "out"] }), time_pref: S("STRING", { nullable: true, description: "HH:MM 24h" }) },
+        required: ["handle", "status"],
+      }),
+    }),
   },
-  required: ["intent", "entities", "edges", "memories", "confirmation"],
-});
-
-export type ThreadFacts = { memories: { text: string; happened_on: string | null }[]; entities: { name: string; kind: string }[] };
-export const threadSchema = S("OBJECT", {
-  properties: {
-    memories: S("ARRAY", { items: S("OBJECT", { properties: { text: S("STRING"), happened_on: S("STRING", { nullable: true }) }, required: ["text"] }) }),
-    entities: S("ARRAY", { items: S("OBJECT", { properties: { name: S("STRING"), kind: S("STRING", { enum: ["person", "pet", "place", "event", "thing"] }) }, required: ["name", "kind"] }) }),
-  },
-  required: ["memories", "entities"],
-});
-
-export const captionSchema = S("OBJECT", { properties: { caption: S("STRING") }, required: ["caption"] });
-
-export type PhotoMemory = {
-  description: string; who_in_photo: string[]; about: string; about_kind: string; memory_text: string;
-  happened_on: string | null; use_as_profile: boolean; confirmation: string;
-};
-export const photoMemorySchema = S("OBJECT", {
-  properties: {
-    description: S("STRING"),
-    who_in_photo: S("ARRAY", { items: S("STRING") }),
-    about: S("STRING"),
-    about_kind: S("STRING", { enum: ["person", "pet", "place", "event", "thing"] }),
-    memory_text: S("STRING"),
-    happened_on: S("STRING", { nullable: true }),
-    use_as_profile: S("BOOLEAN"),
-    confirmation: S("STRING"),
-  },
-  required: ["description", "who_in_photo", "about", "about_kind", "memory_text", "use_as_profile", "confirmation"],
-});
-
-export type VoiceIntent = { transcript: string; intent: "reply" | "question" | "call_me" | "other"; to_person: string | null; text: string };
-export const voiceIntentSchema = S("OBJECT", {
-  properties: {
-    transcript: S("STRING"),
-    intent: S("STRING", { enum: ["reply", "question", "call_me", "other"] }),
-    to_person: S("STRING", { nullable: true }),
-    text: S("STRING"),
-  },
-  required: ["transcript", "intent", "text"],
+  required: ["intent", "facts", "text_votes", "rsvps"],
 });

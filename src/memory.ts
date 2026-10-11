@@ -1,3 +1,4 @@
+import { quoteIn } from "./quote";
 // Group memory: verified facts (who said it, exact quote, when). Implements MemoryModule from contracts.ts.
 import { db } from "./db";
 import { emit, log } from "./events";
@@ -41,7 +42,7 @@ export function saveFacts(chatId: string, facts: NewFact[], messageTextById: Rec
     if (!KINDS.includes(f.kind)) { log.warn(`fact dropped: bad kind ${f.kind}`); continue; }
     if (!Object.prototype.hasOwnProperty.call(messageTextById, f.msgId)) { log.warn(`fact dropped: msg ${f.msgId} is not ${member.name}'s`); continue; }
     const quote = (f.quote ?? "").trim();
-    if (!quote || !messageTextById[f.msgId].toLowerCase().includes(quote.toLowerCase())) {
+    if (!quote || !messageTextById[f.msgId] || !quoteIn(quote, messageTextById[f.msgId], member.name)) {
       log.warn(`fact dropped: quote not in ${member.name}'s message`);
       continue;
     }

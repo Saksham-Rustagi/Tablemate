@@ -1,97 +1,72 @@
-// Card service: rows in SQLite, signed URLs, send app() cards with layout, edit() in place, render for GET /card/:id.
-import { createHmac } from "crypto";
+// Card service: per-member HMAC tokens (plan id + handle → the server knows WHO tapped), card rows in SQLite,
+// app() cards with a layout, edit() in place. Cards only ever go to card-capable (phone) members.
+import { createHmac, timingSafeEqual } from "crypto";
 import type { AppLayout } from "spectrum-ts";
-import { config } from "../config";
-import { db, newId, nowIso, type CardRow } from "../db";
+import { config, mask, memberByHandle, members } from "../config";
+import { db, newId, nowIso } from "../db";
 import { log } from "../events";
 import type { Transport, CardRef } from "../transport";
-import { renderCard, type CardButton, type CardType, type CardView } from "./render";
 
-export type CardData = Omit<CardView, "id" | "type" | "state" | "version" | "token"> & {
-  layout: AppLayout;
-  to: string; // handle the card was sent to
-  meta: Record<string, any>;
-};
+export type CardKind = "offer" | "plan";
+type CardRow = { id: string; plan_id: string; handle: string; message_id: string | null; token: string; kind: CardKind; session: string | null; version: number };
 
 const refs = new Map<string, CardRef>();
 let transport: Transport | null = null;
 export function setCardTransport(t: Transport) { transport = t; }
+export function getTransport(): Transport | null { return transport; }
 
-export function cardToken(id: string): string {
-  return createHmac("sha256", config.signingSecret).update(`card:${id}`).digest("base64url").slice(0, 22);
+export function planToken(planId: string, handle: string): string {
+  return createHmac("sha256", config.cardSecret).update(`plan:${planId}:${handle}`).digest("base64url").slice(0, 22);
 }
-export function checkToken(id: string, t: string | null | undefined): boolean {
-  return !!t && t === cardToken(id);
-}
-export function cardUrl(id: string, version: number): string {
-  return `${config.publicBase}/card/${id}?t=${cardToken(id)}&v=${version}`;
-}
-
-export function getCard(id: string): { row: CardRow; data: CardData } | null {
-  const row = db.query("SELECT * FROM card WHERE id = ?").get(id) as CardRow | null;
-  if (!row) return null;
-  return { row, data: JSON.parse(row.data) as CardData };
-}
-
-export function viewOf(row: CardRow, data: CardData): CardView {
-  const { layout: _l, to: _t, meta: _m, ...v } = data;
-  return { ...v, id: row.id, type: row.type as CardType, state: row.state, version: row.version, token: cardToken(row.id) };
-}
-
-export function renderCardHtml(id: string): string | null {
-  const c = getCard(id);
-  if (!c) return null;
-  return renderCard(viewOf(c.row, c.data));
-}
-
-export async function createCard(type: CardType, state: string, data: CardData): Promise<{ id: string; sent: boolean }> {
-  const id = newId("c");
-  db.query("INSERT INTO card (id, type, state, data, version, created_at, updated_at) VALUES (?,?,?,?,1,?,?)")
-    .run(id, type, state, JSON.stringify(data), nowIso(), nowIso());
-  if (!transport) return { id, sent: false };
-  // Cards are only ever for Asha (never to family or an unknown sender).
-  if (data.to !== config.ashaHandle) { log.error(`card ${id} refused: recipient is not Asha`); return { id, sent: false }; }
-  const ref = await transport.sendCard(data.to, cardUrl(id, 1), data.layout);
-  if (!ref) { log.warn(`card ${id} not sent`); return { id, sent: false }; }
-  refs.set(id, ref);
-  db.query("UPDATE card SET spectrum_id = ?, session = ? WHERE id = ?").run(ref.id, safeJson(ref.session), id);
-  log.info(`card ${id} (${type}/${state}) sent → ${ref.id}`);
-  return { id, sent: true };
-}
-
-/** Change a card's state/data and edit() the same bubble in place. */
-export async function updateCard(id: string, state: string, patch: Partial<CardData>): Promise<boolean> {
-  const c = getCard(id);
-  if (!c) return false;
-  const data: CardData = { ...c.data, ...patch, meta: { ...c.data.meta, ...(patch.meta ?? {}) } };
-  const version = c.row.version + 1;
-  db.query("UPDATE card SET state = ?, data = ?, version = ?, updated_at = ? WHERE id = ?").run(state, JSON.stringify(data), version, nowIso(), id);
-  if (!transport) return true;
-  let ref = refs.get(id);
-  if (!ref && c.row.spectrum_id) ref = { id: c.row.spectrum_id, session: c.row.session ? JSON.parse(c.row.session) : undefined };
-  if (!ref) return false;
-  const ok = await transport.editCard(data.to, ref, cardUrl(id, version), data.layout);
-  if (ok) db.query("UPDATE card SET session = ? WHERE id = ?").run(safeJson(ref.session), id);
-  log.info(`card ${id} → ${state} (v${version}) ${ok ? "edited in place" : "EDIT FAILED"}`);
-  return ok;
-}
-
-export function cardBySpectrumId(spectrumId: string): { row: CardRow; data: CardData } | null {
-  const row = db.query("SELECT * FROM card WHERE spectrum_id = ?").get(spectrumId) as CardRow | null;
-  return row ? { row, data: JSON.parse(row.data) } : null;
-}
-
-export function latestCard(type: CardType, toHandle?: string): { row: CardRow; data: CardData } | null {
-  const rows = db.query("SELECT * FROM card WHERE type = ? ORDER BY created_at DESC LIMIT 10").all(type) as CardRow[];
-  for (const row of rows) {
-    const data = JSON.parse(row.data) as CardData;
-    if (!toHandle || data.to === toHandle) return { row, data };
+/** Which member does this token belong to? null = invalid. */
+export function handleForToken(planId: string, t: string | null | undefined): string | null {
+  if (!t) return null;
+  for (const m of members()) {
+    const want = Buffer.from(planToken(planId, m.handle));
+    const got = Buffer.from(t);
+    if (want.length === got.length && timingSafeEqual(want, got)) return m.handle;
   }
   return null;
 }
+export function planUrl(planId: string, handle: string, version: number): string {
+  return `${config.publicBaseUrl}/plan/${planId}?t=${planToken(planId, handle)}&v=${version}`;
+}
 
-export function btn(label: string, action: string, payload?: Record<string, unknown>, style: CardButton["style"] = "blue"): CardButton {
-  return { id: `${action}_${Math.random().toString(36).slice(2, 7)}`, label, action, payload, style };
+export function cardsOf(planId: string, kinds?: CardKind[]): CardRow[] {
+  const rows = db.query("SELECT * FROM card WHERE plan_id = ? ORDER BY created_at").all(planId) as CardRow[];
+  return kinds ? rows.filter((r) => kinds.includes(r.kind)) : rows;
+}
+
+export async function sendCard(planId: string, handle: string, kind: CardKind, layout: AppLayout): Promise<boolean> {
+  const m = memberByHandle(handle);
+  // Pro lines can only reach phone numbers; the email member votes by typing in the group.
+  if (!m || !m.cardCapable) { log.warn(`card refused: ${mask(handle)} can't receive cards`); return false; }
+  if (cardsOf(planId, [kind]).some((c) => c.handle === m.handle)) { log.warn(`card refused: ${m.name} already has a ${kind} card`); return false; }
+  const id = newId("c");
+  db.query("INSERT INTO card (id, plan_id, handle, token, kind, version, created_at) VALUES (?,?,?,?,?,1,?)").run(id, planId, m.handle, planToken(planId, m.handle), kind, nowIso());
+  if (!transport) return false;
+  const ref = await transport.sendCard(m.handle, planUrl(planId, m.handle, 1), layout);
+  if (!ref) { log.warn(`${kind} card to ${m.name} not sent`); return false; }
+  refs.set(id, ref);
+  db.query("UPDATE card SET message_id = ?, session = ? WHERE id = ?").run(ref.id, safeJson(ref.session), id);
+  log.info(`${kind} card → ${m.name} (${ref.id})`);
+  return true;
+}
+
+/** edit() every card of these kinds for the plan, in place. */
+export async function editCards(planId: string, kinds: CardKind[], layout: AppLayout): Promise<number> {
+  let n = 0;
+  for (const c of cardsOf(planId, kinds)) {
+    const version = c.version + 1;
+    db.query("UPDATE card SET version = ? WHERE id = ?").run(version, c.id);
+    if (!transport) continue;
+    let ref = refs.get(c.id);
+    if (!ref && c.message_id) ref = { id: c.message_id, session: c.session ? JSON.parse(c.session) : undefined };
+    if (!ref) continue;
+    const ok = await transport.editCard(c.handle, ref, planUrl(planId, c.handle, version), layout);
+    if (ok) { n++; db.query("UPDATE card SET session = ? WHERE id = ?").run(safeJson(ref.session), c.id); }
+  }
+  return n;
 }
 
 function safeJson(v: unknown): string | null {
