@@ -100,3 +100,4 @@ Sources: `~/kin/docs/01_photon_track/winners_vs_losers.md` and the Photon track 
   - Photon: only the Kin project "HackNC2026" exists. A new project needs a Stripe checkout with the promo, so the user must do it in the morning.
   - Writing `~/tablemate/CLAUDE.md` was blocked because it needs user approval, so the rules went into `docs/PROJECT_RULES.md`.
 - **2:25 AM** (main): Kin gallery committed (19ebbcd, 1eafa78). Retell numbers are blocked by KYC (see T2). Launched C2 for the web-call fallback.
+- **2:40 AM** Saksham stopped the overnight work: cron removed, sessions stopped. The remaining work is in docs/MORNING_LIST.md (about 60 min).
