@@ -1,0 +1,22 @@
+{
+  "name": "tablemate",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@google/genai": ">=2.24 <3",
+    "@spectrum-ts/imessage-local": "^12.10.1",
+    "spectrum-ts": "^12.10.1"
+  },
+  "devDependencies": {
+    "@photon-ai/cli": "^2.2.0",
+    "@types/bun": "^1.4.2",
+    "qrcode": "^1.5.4",
+    "typescript": "^7.0.2"
+  },
+  "trustedDependencies": [
+    "protobufjs"
+  ],
+  "patchedDependencies": {
+    "@photon-ai/imessage-kit@3.0.0": "patches/@photon-ai%2Fimessage-kit@3.0.0.patch"
+  }
+}

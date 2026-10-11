@@ -1,0 +1,41 @@
+diff --git a/node_modules/@photon-ai/imessage-kit/.bun-tag-41fa0f46a5a9dd95 b/.bun-tag-41fa0f46a5a9dd95
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/index.js b/dist/index.js
+index 184d04c52ade362b80f24aa65b7c91ceff2c1ee3..77a3e7efdd25ac088ed9b68d223d8c02b043c12f 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -413,7 +413,7 @@ var MESSAGE_FIELDS = [
+   "message.expressive_send_style_id",
+   "message.balloon_bundle_id",
+   "message.destination_caller_id",
+-  "message.ck_chat_id as ck_chat_id",
++  "NULL as ck_chat_id", /* kin: macOS 15 chat.db has no ck_chat_id */
+   "message.was_detonated",
+   "message.expire_state",
+   "message.share_status",
+@@ -1378,12 +1378,15 @@ var MessageWatchSource = class {
+   /** Start watching for new messages. */
+   async start() {
+     if (this.isRunning) return;
+-    this.lastRowId = await this.database.getMaxRowId();
++    this.lastRowId = process.env.IMK_START_ROWID ? Number(process.env.IMK_START_ROWID) : await this.database.getMaxRowId(); /* kin: resume */
+     this.isRunning = true;
+     try {
+       this.ensureWatching();
+       this.trigger();
+       this.consumePromise = this.consumeLoop();
++      /* kin: fs.watch on the WAL can miss writes; poll as a safety net */
++      this.kinPoll = setInterval(() => this.trigger(), Number(process.env.IMK_POLL_MS ?? 1500));
++      this.kinPoll.unref?.();
+     } catch (error) {
+       this.isRunning = false;
+       this.detachWALWatcher();
+@@ -1402,6 +1405,7 @@ var MessageWatchSource = class {
+   async stop() {
+     if (!this.isRunning && !this.consumePromise) return;
+     this.isRunning = false;
++    if (this.kinPoll) { clearInterval(this.kinPoll); this.kinPoll = null; }
+     this.detachWALWatcher();
+     this.detachDirWatcher();
+     if (this.triggerResolve) {
